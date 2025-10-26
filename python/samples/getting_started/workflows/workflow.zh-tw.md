@@ -1,8 +1,28 @@
 # Agent Framework Workflows 完整技術指南
 
+## 目錄 (Table of Content)
+
+1. [Summary](#summary)
+   - [技術架構總覽](#技術架構總覽)
+   - [主要功能模組](#主要功能模組)
+   - [精簡解說](#精簡解說)
+2. [商務應用](#商務應用)
+3. [基礎模式 (_start-here)](#1-基礎模式-_start-here)
+4. [Agent 整合 (agents)](#2-agent-整合-agents)
+5. [編排模式 (orchestration)](#3-編排模式-orchestration)
+6. [控制流程 (control-flow)](#4-控制流程-control-flow)
+7. [並行處理 (parallelism)](#5-並行處理-parallelism)
+8. [檢查點 (checkpoint)](#6-檢查點-checkpoint)
+9. [組合 (composition)](#7-組合-composition)
+10. [人機互動 (human-in-the-loop)](#8-人機互動-human-in-the-loop)
+11. [狀態管理 (state-management)](#9-狀態管理-state-management)
+12. [觀察性 (observability)](#10-觀察性-observability)
+13. [可視化 (visualization)](#11-可視化-visualization)
+14. [結論](#結論)
+
 ## Summary
 
-本文檔涵蓋了 Agent Framework 中工作流程 (Workflows) 的所有核心概念和實作模式，從基礎的執行器 (Executor) 和邊 (Edge) 到複雜的並行處理、檢查點持久化、人機互動等進階功能。
+本文檔涵蓋了 Agent Framework 中工作流程 (Workflows) 的所有核心概念和實作模式,從基礎的執行器 (Executor) 和邊 (Edge) 到複雜的並行處理、檢查點持久化、人機互動等進階功能。
 
 ### 技術架構總覽
 - **基礎框架**: Agent Framework
@@ -22,6 +42,294 @@
 | **檢查點** | 容錯與恢復 | Checkpoint Storage | 持久化、斷點續傳 |
 | **人機互動** | 需人工審核 | RequestInfoExecutor | 暫停/恢復、互動式輸入 |
 | **可視化** | 流程圖示 | WorkflowViz | Mermaid、SVG 輸出 |
+
+---
+
+### 精簡解說
+
+以下是每個功能模組的核心概念與最精簡程式碼示範:
+
+#### 1️⃣ 基礎模式
+**核心概念**: 使用 Executor 定義節點,用 Edge 連接節點,透過 WorkflowContext 傳遞訊息
+
+```python
+@executor(id="process")
+async def process(text: str, ctx: WorkflowContext[str]) -> None:
+    result = text.upper()
+    await ctx.yield_output(result)
+
+workflow = WorkflowBuilder().add_executor(process).build()
+```
+
+#### 2️⃣ Agent 整合
+**核心概念**: 將 AI Agent 作為 Executor 嵌入工作流程,支援工具呼叫和串流
+
+```python
+agent = chat_client.create_agent(instructions="You are helpful.")
+workflow = WorkflowBuilder().set_start_executor(agent).build()
+async for event in workflow.run_stream("Hello"):
+    print(event)
+```
+
+#### 3️⃣ 編排模式
+**核心概念**: 使用 ConcurrentBuilder/SequentialBuilder 快速建立多 Agent 協作
+
+```python
+# 並行執行三個 Agent
+workflow = ConcurrentBuilder().participants([agent1, agent2, agent3]).build()
+
+# 順序執行
+workflow = SequentialBuilder().participants([writer, reviewer]).build()
+```
+
+#### 4️⃣ 控制流程
+**核心概念**: 使用 EdgeCondition 實現條件路由和循環
+
+```python
+async def is_valid(data: str) -> bool:
+    return len(data) > 10
+
+workflow = (
+    WorkflowBuilder()
+    .add_edge(validator, success_handler, condition=EdgeCondition(is_valid))
+    .add_edge(validator, retry_handler, condition=EdgeCondition(lambda d: len(d) <= 10))
+    .build()
+)
+```
+
+#### 5️⃣ 並行處理
+**核心概念**: 使用 Fan-out/Fan-in 實現分散式任務處理
+
+```python
+workflow = (
+    WorkflowBuilder()
+    .add_fan_out_edges(dispatcher, [worker1, worker2, worker3])
+    .add_fan_in_edges([worker1, worker2, worker3], aggregator)
+    .build()
+)
+```
+
+#### 6️⃣ 檢查點
+**核心概念**: 自動儲存工作流程狀態,支援斷點續傳
+
+```python
+storage = FileCheckpointStorage(storage_path="./checkpoints")
+workflow = WorkflowBuilder().with_checkpointing(checkpoint_storage=storage).build()
+
+# 從檢查點恢復
+await workflow.run_from_checkpoint(checkpoint_id="...", checkpoint_storage=storage)
+```
+
+#### 7️⃣ 組合
+**核心概念**: 將工作流程作為子流程嵌入另一個工作流程
+
+```python
+sub_workflow = WorkflowBuilder().add_edge(step1, step2).build()
+main_workflow = WorkflowBuilder().add_edge(pre, sub_workflow).add_edge(sub_workflow, post).build()
+```
+
+#### 8️⃣ 人機互動
+**核心概念**: 使用 RequestInfoExecutor 暫停流程等待人工輸入
+
+```python
+request_info = RequestInfoExecutor(id="human_input")
+workflow = WorkflowBuilder().add_edge(agent, request_info).add_edge(request_info, agent).build()
+
+# 提供人工回應
+await workflow.send_responses_streaming({"request_id": "approved"})
+```
+
+#### 9️⃣ 狀態管理
+**核心概念**: 透過 WorkflowContext 管理共享狀態和執行器私有狀態
+
+```python
+@handler
+async def process(data: str, ctx: WorkflowContext[str]) -> None:
+    # 設定共享狀態
+    await ctx.set_shared_state("key", "value")
+    # 讀取共享狀態
+    value = await ctx.get_shared_state("key")
+```
+
+#### 🔟 觀察性
+**核心概念**: 使用 WorkflowTracer 追蹤執行過程
+
+```python
+class CustomTracer(WorkflowTracer):
+    async def on_executor_start(self, executor_id: str, input_data: Any) -> None:
+        print(f"Started: {executor_id}")
+
+workflow = WorkflowBuilder().with_tracer(CustomTracer()).build()
+```
+
+#### 1️⃣1️⃣ 可視化
+**核心概念**: 使用 WorkflowViz 生成流程圖
+
+```python
+viz = WorkflowViz(workflow)
+print(viz.to_mermaid())  # Mermaid 格式
+svg_file = viz.export(format="svg")  # 輸出 SVG
+```
+
+---
+
+## 商務應用
+
+以下是每個功能模組的實際商務應用場景:
+
+### 1️⃣ 基礎模式 - 商務應用
+
+1. **客戶服務自動化**: 
+   - 建立「接收客戶訊息 → 分類問題 → 路由到專業客服」的基礎工作流程
+   - 使用簡單的執行器鏈處理標準化客服流程
+
+2. **文件處理流水線**: 
+   - 實作「上傳文件 → 格式轉換 → 內容萃取 → 儲存」的文件處理流程
+   - 每個步驟對應一個執行器,串接成自動化管線
+
+3. **資料驗證與清洗**: 
+   - 建構「讀取資料 → 格式驗證 → 清洗異常值 → 輸出結果」的資料預處理流程
+   - 適用於 ETL 流程的標準化處理
+
+### 2️⃣ Agent 整合 - 商務應用
+
+1. **智能內容創作平台**: 
+   - Writer Agent 生成初稿 → Reviewer Agent 審閱 → Editor Agent 潤飾
+   - 自動化內容生產流程,提升創作效率
+
+2. **多語言客戶支援**: 
+   - Translation Agent 翻譯客戶問題 → Support Agent 生成回應 → Translation Agent 翻譯回客戶語言
+   - 支援全球化客戶服務
+
+3. **智能研究助理**: 
+   - Research Agent 搜尋資料 → Analysis Agent 分析內容 → Summary Agent 生成摘要
+   - 加速研究和資訊整理工作
+
+### 3️⃣ 編排模式 - 商務應用
+
+1. **產品上市決策系統**: 
+   - 並行諮詢 Market Analyst、Legal Advisor、Finance Reviewer
+   - 快速收集多方專業意見,加速決策流程
+
+2. **多渠道行銷活動**: 
+   - 順序執行 Campaign Planner → Content Creator → Channel Deployer
+   - 確保行銷活動的一致性和順序性
+
+3. **智能招聘系統**: 
+   - Magentic 協調 Resume Screener、Technical Interviewer、HR Interviewer
+   - AI 智能規劃面試流程,提升招聘效率
+
+### 4️⃣ 控制流程 - 商務應用
+
+1. **貸款審批流程**: 
+   - 根據信用評分條件路由到不同審批路徑(快速通道/詳細審查/拒絕)
+   - 實現風險分級處理
+
+2. **品質檢驗循環**: 
+   - 檢驗產品 → 若不合格返回修正 → 重新檢驗 → 直到合格
+   - 自動化品質控制流程
+
+3. **客戶分級服務**: 
+   - 根據客戶價值(VIP/一般/新客)路由到不同服務團隊
+   - 優化客戶體驗和資源分配
+
+### 5️⃣ 並行處理 - 商務應用
+
+1. **大規模報表生成**: 
+   - 將數千個客戶的月報生成任務分散到多個 Worker 並行處理
+   - 顯著縮短報表生成時間
+
+2. **圖片批次處理**: 
+   - Fan-out: 分發 10000 張圖片到 100 個 Worker 進行壓縮、加浮水印
+   - Fan-in: 聚合處理結果並上傳到 CDN
+
+3. **市場情報收集**: 
+   - Map: 並行爬取多個競爭對手網站
+   - Reduce: 聚合資訊生成市場分析報告
+
+### 6️⃣ 檢查點 - 商務應用
+
+1. **長時程審批流程**: 
+   - 合約審批流程可能歷時數天,使用檢查點保存進度
+   - 系統故障或重啟後可從斷點繼續
+
+2. **多步驟訂單處理**: 
+   - 訂單處理「確認 → 付款 → 出貨 → 配送」每步儲存檢查點
+   - 任何環節失敗都可以精確恢復
+
+3. **複雜資料遷移**: 
+   - 大規模資料庫遷移過程中定期儲存檢查點
+   - 遇到錯誤時從最近檢查點重試,避免從頭開始
+
+### 7️⃣ 組合 - 商務應用
+
+1. **模組化業務流程**: 
+   - 將「發票處理」子流程嵌入「訂單管理」主流程
+   - 實現業務邏輯的重用和模組化
+
+2. **多層級審批系統**: 
+   - 主流程包含「部門審批」子流程和「財務審批」子流程
+   - 每個子流程可獨立運行和測試
+
+3. **複雜供應鏈管理**: 
+   - 主流程「訂單履行」包含「庫存檢查」、「採購」、「物流」等子流程
+   - 分層管理複雜業務邏輯
+
+### 8️⃣ 人機互動 - 商務應用
+
+1. **法律文件審核**: 
+   - AI 生成合約草案 → 法務人員審閱並提供修改意見 → AI 修訂
+   - 結合 AI 效率和人類專業判斷
+
+2. **高風險交易審核**: 
+   - 自動檢測異常交易 → 暫停並通知風控人員 → 人工決定放行或拒絕
+   - 在自動化和安全性間取得平衡
+
+3. **內容發布審查**: 
+   - AI 生成社群媒體內容 → 行銷人員審核並調整 → 定時發布
+   - 確保品牌形象和內容品質
+
+### 9️⃣ 狀態管理 - 商務應用
+
+1. **購物車管理**: 
+   - 共享狀態儲存購物車內容、用戶偏好、促銷資訊
+   - 多個執行器(推薦引擎、定價引擎)共享存取
+
+2. **多階段問卷調查**: 
+   - 共享狀態累積用戶所有問卷回答
+   - 後續 Agent 根據前面答案動態調整問題
+
+3. **客戶旅程追蹤**: 
+   - 共享狀態記錄客戶在網站上的所有互動
+   - 多個 Agent(推薦、客服、行銷)根據完整旅程提供服務
+
+### 🔟 觀察性 - 商務應用
+
+1. **SLA 監控**: 
+   - 追蹤每個執行器的執行時間,確保符合服務等級協議
+   - 及時發現效能瓶頸
+
+2. **異常檢測與警報**: 
+   - 監控工作流程執行,自動偵測異常模式
+   - 觸發警報通知維運團隊
+
+3. **業務流程優化**: 
+   - 分析追蹤資料找出低效環節
+   - 提供流程改進建議
+
+### 1️⃣1️⃣ 可視化 - 商務應用
+
+1. **業務流程文檔化**: 
+   - 自動生成標準作業流程(SOP)圖示
+   - 用於員工培訓和流程審計
+
+2. **系統架構溝通**: 
+   - 向非技術利害關係人展示系統運作流程
+   - 促進跨部門協作和理解
+
+3. **流程除錯與優化**: 
+   - 視覺化展示複雜流程的執行路徑
+   - 快速定位問題節點和優化機會
 
 ---
 
@@ -1226,7 +1534,8 @@ class TurnManager(Executor):
             HumanFeedbackRequest(
                 prompt=f"Agent guessed: {guess}. Reply: higher/lower/correct",
                 guess=guess
-            )
+            ),
+            target_id=self._reviewer_id
         )
     
     @handler
