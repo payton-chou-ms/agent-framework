@@ -29,6 +29,7 @@ from ._events import (
     WorkflowEvent,
 )
 from ._message_utils import normalize_messages_input
+from ._typing_utils import is_type_compatible
 
 if TYPE_CHECKING:
     from ._workflow import Workflow
@@ -59,10 +60,13 @@ class WorkflowAgent(BaseAgent):
 
         @classmethod
         def from_json(cls, raw: str) -> "WorkflowAgent.RequestInfoFunctionArgs":
-            data = json.loads(raw)
-            if not isinstance(data, dict):
+            try:
+                parsed: Any = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"RequestInfoFunctionArgs JSON payload is malformed: {exc}") from exc
+            if not isinstance(parsed, dict):
                 raise ValueError("RequestInfoFunctionArgs JSON payload must decode to a mapping")
-            return cls.from_dict(data)
+            return cls.from_dict(cast(dict[str, Any], parsed))
 
     def __init__(
         self,
@@ -93,7 +97,7 @@ class WorkflowAgent(BaseAgent):
         except KeyError as exc:  # Defensive: workflow lacks a configured entry point
             raise ValueError("Workflow's start executor is not defined.") from exc
 
-        if list[ChatMessage] not in start_executor.input_types:
+        if not any(is_type_compatible(list[ChatMessage], input_type) for input_type in start_executor.input_types):
             raise ValueError("Workflow's start executor cannot handle list[ChatMessage]")
 
         super().__init__(id=id, name=name, description=description, **kwargs)
@@ -232,8 +236,9 @@ class WorkflowAgent(BaseAgent):
     ) -> AgentRunResponseUpdate | None:
         """Convert a workflow event to an AgentRunResponseUpdate.
 
-        Only AgentRunUpdateEvent and RequestInfoEvent are processed and the rest
-        are not relevant. Returns None if the event is not relevant.
+        Only AgentRunUpdateEvent and RequestInfoEvent are processed.
+        Other workflow events are ignored as they are workflow-internal and should
+        have corresponding AgentRunUpdateEvent emissions if relevant to agent consumers.
         """
         match event:
             case AgentRunUpdateEvent(data=update):
@@ -267,9 +272,8 @@ class WorkflowAgent(BaseAgent):
                     created_at=datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
                 )
             case _:
-                # Ignore non-agent workflow events
+                # Ignore workflow-internal events
                 pass
-        # We only care about the above two events and discard the rest.
         return None
 
     def _extract_function_responses(self, input_messages: list[ChatMessage]) -> dict[str, Any]:
